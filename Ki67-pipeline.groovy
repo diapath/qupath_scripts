@@ -111,17 +111,10 @@ def add_hotspot(String parentName, String hsName, double radiusMicrons=500.0, in
     double pixelSizeMicrons=20.0
     boolean tumorOnly=false
 
-    //print radiusMicrons;
-    //print minCells;
-
-    //double radiusMicrons = 500.0
-    //int minCells = 500
-
     def hierarchy = QP.getCurrentHierarchy()
     def hasHotspot = false
 
     //remove hotspots
-    //println("Removing "+hsName)
     removeObjects(getAnnotationObjects().findAll{it.getName().startsWith(hsName)},true)
 
     //Find the tissue with the most positive cells
@@ -130,8 +123,6 @@ def add_hotspot(String parentName, String hsName, double radiusMicrons=500.0, in
             continue
         else if (parentName != "" && parent.getName() != parentName)
             continue
-
-        //println( "Scanning: "+parent.getName())
 
         def cells = hierarchy.getObjectsForROI(null, parent.getROI()).findAll { it.isDetection() }
         def pcells = cells.findAll {it.getPathClass() == getPathClass("Positive")}
