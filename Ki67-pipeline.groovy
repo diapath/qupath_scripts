@@ -1,30 +1,40 @@
 /*
 ----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*
 
-SCRIPT AUTHOR: EGOR ZINDY,
-BASED IN PARTS ON SCRIPTS BY PIERRE CARON FOR DIAPATH 2019.
-HOTSPOT CODE BY PETE BANKHEAD
+Script author: Egor Zindy,
+Based in parts on scripts by Pierre Caron for DIAPath 2019.
 
-EXECUTING THE PIPELINE ON A QUPATH PROJECT IMAGE DOES THE FOLLOWING OPERATIONS:
-  * TISSUE DETECTION
-  * IMPORTING THE NDPA ANNOTATIONS FOR THE IMAGE, WITH ROI THE TUMOUR REGION AND ROI2 THE HOTSPOT
-  * DETECTING AND COUNTING NEGATIVELY AND POSITIVELY STAINED NUCLEI.
-  * HOTSPOT SEARCH IN THE ROI union ROI2 REGION
+Hotspot code by Pete Bankhead, additions by Mike Nelson
+https://forum.image.sc/t/discussion-and-script-what-is-a-hotspot/34054
 
-  * AUTOMATICALLY SAVE AND CONCATENATE ALL THE RESULTS IN A SINGLE CSV FILE IN:
+Executing the pipeline on a QuPath project image does the following operations:
+  * Tissue detection
+  * Importing the NDPA annotations for the image, with ROI the tumour region and ROI2 the hotspot region
+  * Detecting and counting negatively and positively stained nuclei.
+  * Hotspot search in the "ROI union ROI2" region
+
+  * Automatically save and concatenate all the results in a single CSV file in:
       annotation_results/Combined_Results.csv 
 
-THIS SCRIPT CAN BE RUN AUTOMATICALLY ON ALL THE IMAGES OF A PROJECT
+This script can be run automatically on all the images of a project
                         
 ----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*
 */
 
+def tissueThreshold = 225
+def minCells = 1000
+def radiusMicrons = 330
 
 import qupath.lib.scripting.QP
 import qupath.lib.gui.scripting.QPEx
 import qupath.lib.regions.RegionRequest
 import qupath.lib.objects.PathAnnotationObject
 import qupath.lib.objects.classes.PathClassFactory
+import qupath.lib.objects.PathObjectTools
+import qupath.lib.objects.classes.PathClassTools
+import qupath.lib.regions.ImagePlane
+import qupath.lib.objects.PathObjects
+import qupath.lib.objects.PathAnnotationObject
 
 import qupath.lib.roi.*
 import qupath.lib.roi.RoiTools
@@ -33,7 +43,9 @@ import qupath.lib.roi.interfaces.ROI;
 
 import qupath.lib.geom.Point2
 import qupath.lib.images.servers.ImageServer
+
 import qupath.lib.common.GeneralTools
+import qupath.lib.common.ColorTools;
 
 import java.io.*
 import java.awt.*
@@ -56,8 +68,6 @@ import qupath.lib.objects.PathDetectionObject
 
 import java.awt.Color
 
-import qupath.ext.stardist.StarDist2D
-
 // https://groups.google.com/forum/#!searchin/qupath-users/ndpa%7Csort:date/qupath-users/xhCx_nhbWQQ/QoUOQB24CQAJ
 // Script to find highest density of positive cells in QuPath v0.2.0-m5.
 // Assumes cell detection has already been calculated.
@@ -66,16 +76,30 @@ import qupath.ext.stardist.StarDist2D
 /*     
 ----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*
 
-                        COMBINE TWO REGIONS INTO ONE (ROI union ROI2 -> ROI_COMBINED
+                        Combine two regions into one (ROI union ROI2 -> ROI_COMBINED)
                         
 ----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*
 */
 
-def add_merged_rois(parentPrefix, parentClass) {
-    def hierarchy = QP.getCurrentHierarchy()
+def getImageData() {
+    def imageData = QP.getCurrentImageData()
+
+    if (imageData == null) {
+        def gui = QuPathGUI.getInstance()
+
+        if (gui != null) {
+            def viewer = gui.getViewer()
+            imageData = viewer.getImageData()
+        }
+    }
+    return imageData
+}
+
+def add_merged_rois(imageData, parentPrefix, parentClass) {
+    def hierarchy = imageData.getHierarchy()
 
     // Here we do the union of ALL the ROI and ROI2, that's probably the easiest way
-    def regions = getAnnotationObjects().findAll {it.getPathClass() == getPathClass(parentClass)}
+    def regions = hierarchy.getAnnotationObjects().findAll {it.getPathClass() == PathClassFactory.getPathClass(parentClass)}
 
     def roiNew = null
     for (regionPath in regions) {
@@ -98,41 +122,49 @@ def add_merged_rois(parentPrefix, parentClass) {
 /*     
 ----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*
 
-                        AUTOMATIC HOTSPOT DETECTION
+                        Automatic hotspot detection
 
-BASED ON CODE BY PETE BANKHEAD @petebankhead AND CLEAN-UP BY MIKE NELSON @Mike_Nelson
+Based on code by Pete Bankhead @petebankhead and clean-up by Mike Nelson @Mike_Nelson
 https://forum.image.sc/t/find-highest-staining-region-of-a-slide/31251/6
 https://forum.image.sc/t/discussion-and-script-what-is-a-hotspot/34054
 
 ----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*
 */
 
-def add_hotspot(String parentName, String hsName, double radiusMicrons=500.0, int minCells=500, int minNegCells=0) {
+def add_hotspot(imageData, String parentName, String hsName, double radiusMicrons=330.0, int minCells=1000, int minNegCells=0, PathAnnotationObject selectedROI=null) {
     double pixelSizeMicrons=20.0
     boolean tumorOnly=false
 
-    def hierarchy = QP.getCurrentHierarchy()
+    def hierarchy = imageData.getHierarchy()
+
     def hasHotspot = false
 
     //remove hotspots
-    removeObjects(getAnnotationObjects().findAll{it.getName().startsWith(hsName)},true)
+    hierarchy.removeObjects(hierarchy.getAnnotationObjects().findAll{it.getName().startsWith(hsName)},true)
 
     //Find the tissue with the most positive cells
-    for (parent in getAnnotationObjects()) {
-        if (parentName == "" && !parent.getName().startsWith("Tissue"))
-            continue
-        else if (parentName != "" && parent.getName() != parentName)
-            continue
+    for (parent in hierarchy.getAnnotationObjects()) {
+        if (selectedROI == null)
+        {
+            if (parentName == "" && !parent.getName().startsWith("Tissue"))
+                continue
+            else if (parentName != "" && parent.getName() != parentName)
+                continue
+        } else {
+            if (parent != selectedROI)
+                continue
+        }
 
         def cells = hierarchy.getObjectsForROI(null, parent.getROI()).findAll { it.isDetection() }
-        def pcells = cells.findAll {it.getPathClass() == getPathClass("Positive")}
+        def pcells = cells.findAll {it.getPathClass() == PathClassFactory.getPathClass("Positive")}
 
         if (cells.size < minCells)
             continue
 
+        QP.logger.info("Searching for a hotspot in {} - {} cells (of which {} positive)",parent.getName(),cells.size(), pcells.size())
+
         hasHotspot = true
         def filterClass = null
-        def imageData = getCurrentImageData()
         def server = imageData.getServer()
 
         double downsample = pixelSizeMicrons / server.getPixelCalibration().getAveragedPixelSizeMicrons()
@@ -180,7 +212,7 @@ def add_hotspot(String parentName, String hsName, double radiusMicrons=500.0, in
 
         // Update valid mask
         ByteProcessor bpValid
-        def annotations = getAnnotationObjects()
+        def annotations = hierarchy.getAnnotationObjects()
         if (annotations) {
             def imgMask = new BufferedImage(w, h, BufferedImage.TYPE_BYTE_GRAY)
             def g2d = imgMask.createGraphics()
@@ -233,45 +265,63 @@ def add_hotspot(String parentName, String hsName, double radiusMicrons=500.0, in
         def roi = ROIs.createEllipseROI(x - fullRadius, y - fullRadius, fullRadius*2, fullRadius*2, ImagePlane.getDefaultPlane())
         def hotspot = PathObjects.createAnnotationObject(roi)
 
-        if (parentName == "")
+        if (selectedROI != null) 
+            hotspot.setName(hsName+"_"+selectedROI.getName())
+        else if (parentName == "")
             hotspot.setName(parent.getName().replace("Tissue",hsName))
         else
             hotspot.setName(parent.getName().replace(parentName,hsName))
 
         hotspot.setPathClass(PathClassFactory.getPathClass("Region"))
         hotspot.setColorRGB(ColorTools.makeRGB(0, 255, 0))
-        addObject(hotspot)
+        hierarchy.addPathObject(hotspot)
 
-        cells = hierarchy.getObjectsForROI(null, hotspot.getROI())
-            .findAll { it.isDetection() }
+        cells = hierarchy.getObjectsForROI(null, hotspot.getROI()).findAll { it.isDetection() }
+        pcells = cells.findAll {it.getPathClass() == PathClassFactory.getPathClass("Positive")}
+        ncells = cells.findAll {it.getPathClass() == PathClassFactory.getPathClass("Negative")}
 
-        pcells = cells.findAll {it.getPathClass() == getPathClass("Positive")}
-        ncells = cells.findAll {it.getPathClass() == getPathClass("Negative")}
-
-        println "Parent class:"+parent.getName()+" - found "+cells.size()+" cells, "+pcells.size()+" positive, "+ncells.size()+" negative"
+        QP.logger.info("Parent class:{} - found {} cells, {} positive, {} negative", parent.getName(), cells.size(), pcells.size(), ncells.size())
         return hasHotspot
     }
     //new ImagePlus("Density", fpDensity).show()
+}
+
+// it is possible to start with a larger radius hotspot and decrease its size until a hotspot is found.
+def add_adaptative_hotspot(imageData, radiusMicrons=[1000, 500, 330], minCellList=[1000,500,500]) {
+    hasHSR = false
+    hasHST = false
+
+    // The idea here is, can we find a large hotspot first (hasHSR becomes true) and
+    // if not, look for hotspots of smallest size.
+    [minCellList,radiusMicrons].transpose().each { m,r ->
+        if (!hasHSR)
+            hasHSR = add_hotspot(imageData, "ROI_COMBINED","HSROI",r, m) ? true : false
+        if (!hasHST)
+            hasHST = add_hotspot(imageData, "TISSUE_COMBINED","HSTISSUE",r, m) ? true : false
+    }
 }
 
 
 /*     
 ----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*
 
-                        AUTOMATIC TISSUE DETECTION
+                        Automatic tissue detection
                         
 ----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*
 */
 
-def detect_tissue(imageType='BRIGHTFIELD_H_DAB',threshold=220)
+def detect_tissue(imageData, imageType='BRIGHTFIELD_H_DAB',threshold=220)
 {
-    setImageType(imageType);
-    setColorDeconvolutionStains('{"Name" : "H-DAB default", "Stain 1" : "Hematoxylin", "Values 1" : "0.767 0.570 0.288 ", "Stain 2" : "DAB", "Values 2" : "0.243 0.490 0.833 ", "Background" : " 255 255 255 "}');
+    QP.logger.info("detecting tissue {} {} {}",imageData, imageType, threshold);
+    QP.setImageType(imageType);
+    QP.setColorDeconvolutionStains('{"Name" : "H-DAB default", "Stain 1" : "Hematoxylin", "Values 1" : "0.767 0.570 0.288 ", "Stain 2" : "DAB", "Values 2" : "0.243 0.490 0.833 ", "Background" : " 255 255 255 "}');
 
-    runPlugin('qupath.imagej.detect.tissue.SimpleTissueDetection2', '{"threshold": '+threshold+',  "requestedPixelSizeMicrons": 20.0,  "minAreaMicrons": 10000,  "maxHoleAreaMicrons": 1000000.0,  "darkBackground": false,  "smoothImage": true,  "medianCleanup": true,  "dilateBoundaries": false,  "smoothCoordinates": true,  "excludeOnBoundary": false,  "singleAnnotation": false}');
+    QP.runPlugin('qupath.imagej.detect.tissue.SimpleTissueDetection2', imageData, '{"threshold": '+threshold+',  "requestedPixelSizeMicrons": 20.0,  "minAreaMicrons": 10000,  "maxHoleAreaMicrons": 1000000.0,  "darkBackground": false,  "smoothImage": true,  "medianCleanup": true,  "dilateBoundaries": false,  "smoothCoordinates": true,  "excludeOnBoundary": false,  "singleAnnotation": false}');
 
     def double areaMax = 0
-    for (annotation in getAnnotationObjects()) {
+    def hierarchy = imageData.getHierarchy()
+
+    for (annotation in hierarchy.getAnnotationObjects()) {
         roi = annotation.getROI()  
         area = roi.getArea()
         if (area > areaMax){
@@ -279,13 +329,11 @@ def detect_tissue(imageType='BRIGHTFIELD_H_DAB',threshold=220)
         } 
     }
 
-    def hierarchy = QP.getCurrentHierarchy()
-
     //Minimum area is 5% of areaMax
     areaMin = Math.round(areaMax * .05)
 
     def int i = 1
-    for (annotation in getAnnotationObjects()) {
+    for (annotation in hierarchy.getAnnotationObjects()) {
         roi = annotation.getROI()  
         area = roi.getArea()
         if (area >= areaMin){
@@ -294,7 +342,7 @@ def detect_tissue(imageType='BRIGHTFIELD_H_DAB',threshold=220)
             i += 1
         }
         else {
-            removeObject(annotation,true)
+            hierarchy.removeObject(annotation,true)
         }  
     }
 
@@ -304,14 +352,14 @@ def detect_tissue(imageType='BRIGHTFIELD_H_DAB',threshold=220)
 /* 
 ----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*
 
-              AUTOMATIC NUCLEI DETECTION USING QUPATH'S CELL DETECTION METHOD
+              Automatic nuclei detection using QuPath's cell detection method
     
-             DETECTION COUNTS ARE RECORDED IN A TEXT FILE IN THE PROJECT DIRECTORY
+             Detection counts are recorded in a text file in the project directory
 
 ----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*
 */
 
-def detect_positive(imageType='BRIGHTFIELD_H_DAB')
+def detect_positive(imageData, imageType='BRIGHTFIELD_H_DAB')
 {
     //Parametres positive cell detection
     def requestedPixelSizeMicrons = 0.5
@@ -323,17 +371,17 @@ def detect_positive(imageType='BRIGHTFIELD_H_DAB')
     def threshold = 0.15
     def thresholdPositive1 = 0.25
 
-    def hierarchy = getCurrentHierarchy()
 
-    //This is important, otherwise can't detect cells.
-    setImageType(imageType)
+    QP.logger.info("detecting positive {} {}",imageData, imageType);
+    QP.setImageType(imageType)
 
-    def tissues = getAnnotationObjects().findAll {it.getPathClass() == getPathClass("Tissue")}
+    def hierarchy = imageData.getHierarchy()
+    def tissues = hierarchy.getAnnotationObjects().findAll {it.getPathClass() == PathClassFactory.getPathClass("Tissue")}
 
     //First, detect for each tissues...
     tissues.each{
         hierarchy.getSelectionModel().setSelectedObject(it)
-        runPlugin('qupath.imagej.detect.cells.PositiveCellDetection', '{"detectionImageBrightfield": "Optical density sum",  "requestedPixelSizeMicrons": '+requestedPixelSizeMicrons+',  "backgroundRadiusMicrons": '+backgroundRadiusMicrons+',  "medianRadiusMicrons": '+medianRadiusMicrons+',  "sigmaMicrons": '+sigmaMicrons+',  "minAreaMicrons": '+minAreaMicrons+',  "maxAreaMicrons": '+maxAreaMicrons+',  "threshold": '+threshold+',  "maxBackground": 2.0,  "watershedPostProcess": true,  "excludeDAB": false,  "cellExpansionMicrons": 5.0,  "includeNuclei": true,  "smoothBoundaries": true,  "makeMeasurements": true,  "thresholdCompartment": "Nucleus: DAB OD mean",  "thresholdPositive1": '+thresholdPositive1+',  "thresholdPositive2": 0.4,  "thresholdPositive3": 0.6,  "singleThreshold": true}');
+        QP.runPlugin('qupath.imagej.detect.cells.PositiveCellDetection', imageData, '{"detectionImageBrightfield": "Optical density sum",  "requestedPixelSizeMicrons": '+requestedPixelSizeMicrons+',  "backgroundRadiusMicrons": '+backgroundRadiusMicrons+',  "medianRadiusMicrons": '+medianRadiusMicrons+',  "sigmaMicrons": '+sigmaMicrons+',  "minAreaMicrons": '+minAreaMicrons+',  "maxAreaMicrons": '+maxAreaMicrons+',  "threshold": '+threshold+',  "maxBackground": 2.0,  "watershedPostProcess": true,  "excludeDAB": false,  "cellExpansionMicrons": 5.0,  "includeNuclei": true,  "smoothBoundaries": true,  "makeMeasurements": true,  "thresholdCompartment": "Nucleus: DAB OD mean",  "thresholdPositive1": '+thresholdPositive1+',  "thresholdPositive2": 0.4,  "thresholdPositive3": 0.6,  "singleThreshold": true}');
     }
 
     //Deselect everything
@@ -343,7 +391,7 @@ def detect_positive(imageType='BRIGHTFIELD_H_DAB')
 /* 
 ----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*
 
-              NDPA ANNOTATIONS IMPORT
+              NDPA annotations import
     
 ----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*
 */
@@ -392,9 +440,9 @@ def convertName(details) {
     return ret.capitalize()
 }
     
-def read_ndpa()
+def read_ndpa(imageData)
 {
-    def server = QP.getCurrentImageData().getServer()
+    def server = imageData.getServer()
 
     // We need the pixel size
     def cal = server.getPixelCalibration()
@@ -419,7 +467,7 @@ def read_ndpa()
     def ImageCenter_Y = (h/2)*1000/pixelsPerMicron_Y 
 
     // need to add annotations to hierarchy so qupath sees them
-    def hierarchy = QP.getCurrentHierarchy()
+    def hierarchy = imageData.getHierarchy()
         
     //*********Get NDPA automatically based on naming scheme 
     def path = GeneralTools.toPath(server.getURIs()[0]).toString()+".ndpa";
@@ -434,7 +482,7 @@ def read_ndpa()
     //The Open slide numbers are actually offset from IMAGE center (not physical slide center). 
     //This is annoying, but you can calculate the value you need -- Offset from top left in Nanometers. 
 
-    def map = getCurrentImageData().getServer().osr.getProperties()
+    def map = server.osr.getProperties()
     map.each { k, v ->
         if(k.equals("hamamatsu.XOffsetFromSlideCentre")) {
             OffSet_From_Image_Center_X = v
@@ -564,18 +612,18 @@ def read_ndpa()
 /* 
 ----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*
 
-                              INTERSECT THE REGIONS OF INTEREST WITH THE TISSUE REGION
+                              Intersect the regions of interest with the tissue region
     
 ----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*
 */
 
-def shape_rois() {
+def shape_rois(imageData) {
     // need to add annotations to hierarchy so qupath sees them
-    def hierarchy = QP.getCurrentHierarchy()
+    def hierarchy = imageData.getHierarchy()
 
     //https://gist.github.com/Svidro/5829ba53f927e79bb6e370a6a6747cfd#file-force-update-selected-annotation-groovy
-    def tissues = getAnnotationObjects().findAll {it.getName() == "TISSUE_COMBINED"}
-    def regions = getAnnotationObjects().findAll {it.getPathClass() == getPathClass("Region")}
+    def tissues = hierarchy.getAnnotationObjects().findAll {it.getName() == "TISSUE_COMBINED"}
+    def regions = hierarchy.getAnnotationObjects().findAll {it.getPathClass() == PathClassFactory.getPathClass("Region")}
 
     for (tissuePath in tissues) {
         for (regionPath in regions) {
@@ -597,11 +645,11 @@ def shape_rois() {
         hierarchy.removeObject(regionPath, true)
     }
 
-    for (regionPath in getAnnotationObjects().findAll {it.getName().contains("ROI ")} ) {
+    for (regionPath in hierarchy.getAnnotationObjects().findAll {it.getName().contains("ROI ")} ) {
         regionPath.setColorRGB(ColorTools.makeRGB(0, 0, 0))
     }
 
-    for (regionPath in getAnnotationObjects().findAll {it.getName().contains("ROI2")} ) {
+    for (regionPath in hierarchy.getAnnotationObjects().findAll {it.getName().contains("ROI2")} ) {
         regionPath.setColorRGB(ColorTools.makeRGB(255, 0, 0))
     }
 
@@ -610,7 +658,7 @@ def shape_rois() {
 /* 
 ----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*
 
-                         MERGE RESULTS FOR ALL THE IMAGES IN A PROJECT INTO A SINGLE CSV FILE
+                         Merge results for all the images in a project into a single CSV file
 
 ----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*
 */
@@ -778,23 +826,19 @@ def result_merger(String outputName = 'Combined_results.csv', boolean addTissue 
 /*
 ----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*
 
-                         MAIN SECTION -- CALLING THE PIPELINE FUNCTIONS
+                         Main section -- Calling the pipeline functions
 
 ----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*
 */
 
 def clearAll = true;
 def addTissue = true;
-def tissueThreshold = 225
-def addHotspot = true;
 def addROI = true;
+def addHotspot = true;
 
 String outputName = 'Combined_results.csv'
-
-// Here I was experimenting with testing different radii and minimum numbers of cells iteratively (hence the list)
-// but settled for a single radius to kep things simple for now.
-minCellList = [1000]
-radiusMicrons = [330]
+def imageData = getCurrentImageData()
+def hierarchy = imageData.getHierarchy()
 
 //In case the only thing tested is the hotspot, no need to clear everything
 if (clearAll) {
@@ -802,37 +846,28 @@ if (clearAll) {
     createSelectAllObject(true);
 
     //detect tissue and cells
-    detect_tissue('BRIGHTFIELD_H_DAB',tissueThreshold);
-    detect_positive();
+    detect_tissue(imageData, 'BRIGHTFIELD_H_DAB', tissueThreshold);
+    detect_positive(imageData);
 } else {
-    removeObjects(getAnnotationObjects().findAll{it.getROI() instanceof EllipseROI},true)
+    hierarchy.removeObjects(hierarchy.getAnnotationObjects().findAll{it.getROI() instanceof EllipseROI},true)
 }
 
 if (addROI) {
-    removeObjects(getAnnotationObjects().findAll{it.getName().startsWith("ROI")}, true)
-    removeObjects(getAnnotationObjects().findAll{it.getName().startsWith("TISSUE")}, true)
-    read_ndpa();
-    add_merged_rois("ROI","Region")
-    add_merged_rois("Tissue","Tissue")
-    shape_rois();
+    hierarchy.removeObjects(hierarchy.getAnnotationObjects().findAll{it.getName().startsWith("ROI")}, true)
+    hierarchy.removeObjects(hierarchy.getAnnotationObjects().findAll{it.getName().startsWith("TISSUE")}, true)
+    read_ndpa(imageData);
+    add_merged_rois(imageData, "ROI","Region")
+    add_merged_rois(imageData, "Tissue","Tissue")
+    shape_rois(imageData);
 }
 
 if (addHotspot) {
-    hasHSR = false
-    hasHST = false
-
-    // The idea here is, can we find a large hotspot first (hasHSR becomes true) and
-    // if not, look for hotspots of smallest size.
-    [minCellList,radiusMicrons].transpose().each { m,r ->
-        if (!hasHSR)
-            hasHSR = add_hotspot("ROI_COMBINED","HSROI",r, m) ? true : false
-        if (!hasHST)
-            hasHST = add_hotspot("TISSUE_COMBINED","HSTISSUE",r, m) ? true : false
-    }
+    add_hotspot(imageData, "ROI_COMBINED", "HSROI",radiusMicrons, minCells)
+    add_hotspot(imageData, "TISSUE_COMBINED", "HSTISSUE",radiusMicrons, minCells)
 }
 
 // Saving the annotations
-def namefile = getProjectEntry().getImageName() + '.txt'
+def namefile = QP.getProjectEntry().getImageName() + '.txt'
 def path = buildFilePath(PROJECT_BASE_DIR, 'annotation_results')
 mkdirs(path)
 
