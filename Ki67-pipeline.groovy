@@ -22,7 +22,7 @@ This script can be run automatically on all the images of a project
 */
 
 def tissueThreshold = 225
-def minCells = 1000
+def minCells = 1465
 def radiusMicrons = 330
 def cellThreshold = 0.15
 def cellThresholdPositive = 0.25
