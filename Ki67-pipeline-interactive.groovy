@@ -17,6 +17,8 @@ Details explained in https://forum.image.sc/t/splitting-a-qupath-groovy-script-a
 def tissueThreshold = 225
 def minCells = 1000
 def radiusMicrons = 330
+def cellThreshold = 0.15
+def cellThresholdPositive = 0.25
 
 import qupath.lib.gui.prefs.PathPrefs
 
@@ -117,7 +119,11 @@ Platform.runLater {
     }
     
     menuItem2.setOnAction {
-        pipeline.detect_positive(imageData);
+        def currentObject = viewer.getSelectedObject()
+        if (currentObject != null)
+            Dialogs.showInfoNotification(menuTitle, "Detection only within selected contour!")
+
+        pipeline.detect_positive(imageData, 'BRIGHTFIELD_H_DAB', cellThreshold, cellThresholdPositive, currentObject);
         Dialogs.showInfoNotification(menuTitle, "Nuclei detected!")
     }
 
@@ -141,6 +147,9 @@ Platform.runLater {
 
     menuItem4.setOnAction {
         def currentObject = viewer.getSelectedObject()
+        if (currentObject != null)
+            Dialogs.showInfoNotification(menuTitle, "Detection only within selected contour!")
+
         pipeline.add_hotspot(imageData, "ROI_COMBINED", "HSROI",radiusMicrons, minCells, 0, currentObject)
 
         //If nothing is selected, assume you want to test the pipeline (and test tissue combined)
@@ -151,20 +160,28 @@ Platform.runLater {
     menuItem5.setOnAction {
         def params = new ParameterList()
             .addIntParameter("tissueThreshold", "Tissue Threshold", tissueThreshold, "", "the threshold value for tissue detection")
+            .addDoubleParameter("cellThreshold", "Cell Threshold", cellThreshold, "", "the threshold value for cell detection")
+            .addDoubleParameter("cellThresholdPositive", "Positive cell Threshold", cellThresholdPositive, "", "the threshold value for positive cell detection")
             .addIntParameter("minCells", "Minimum cell count", minCells, "cells", "Minimum number of cells in hotspot")
             .addDoubleParameter("radiusMicrons", "Distance between cells", radiusMicrons, GeneralTools.micrometerSymbol(), "Usually roughly the distance between positive cell centroids")
 
-        if (!Dialogs.showParameterDialog("Parameter", params))
+        if (!Dialogs.showParameterDialog("Global pipeline parameters", params))
             return
 
         tissueThreshold = params.getIntParameterValue("tissueThreshold")
+        cellThreshold = params.getDoubleParameterValue("cellThreshold")
+        cellThresholdPositive = params.getDoubleParameterValue("cellThresholdPositive")
         minCells = params.getIntParameterValue("minCells")
         radiusMicrons = params.getDoubleParameterValue("radiusMicrons")
 
         println("--- parameters ---")
         println("tissueThreshold = "+tissueThreshold)
+        println("cellThreshold = "+cellThreshold)
+        println("cellThresholdPositive = "+cellThresholdPositive)
         println("minCells = "+minCells)
         println("radiusMicrons = "+radiusMicrons)
+
+        Dialogs.showInfoNotification(menuTitle, "New parameters registered!")
     }
 
     menu.getItems().add(menuItem1);

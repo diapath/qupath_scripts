@@ -24,6 +24,8 @@ This script can be run automatically on all the images of a project
 def tissueThreshold = 225
 def minCells = 1000
 def radiusMicrons = 330
+def cellThreshold = 0.15
+def cellThresholdPositive = 0.25
 
 import qupath.lib.scripting.QP
 import qupath.lib.gui.scripting.QPEx
@@ -359,7 +361,7 @@ def detect_tissue(imageData, imageType='BRIGHTFIELD_H_DAB',threshold=220)
 ----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*----*
 */
 
-def detect_positive(imageData, imageType='BRIGHTFIELD_H_DAB')
+def detect_positive(imageData, String imageType='BRIGHTFIELD_H_DAB', double threshold = 0.15, double thresholdPositive1 = 0.25, PathAnnotationObject selectedROI=null)
 {
     //Parametres positive cell detection
     def requestedPixelSizeMicrons = 0.5
@@ -368,15 +370,16 @@ def detect_positive(imageData, imageType='BRIGHTFIELD_H_DAB')
     def sigmaMicrons = 1.5
     def minAreaMicrons = 10.0
     def maxAreaMicrons = 400.0
-    def threshold = 0.15
-    def thresholdPositive1 = 0.25
-
 
     QP.logger.info("detecting positive {} {}",imageData, imageType);
     QP.setImageType(imageType)
 
     def hierarchy = imageData.getHierarchy()
-    def tissues = hierarchy.getAnnotationObjects().findAll {it.getPathClass() == PathClassFactory.getPathClass("Tissue")}
+    def tissues = []
+    if (selectedROI == null)
+        tissues = hierarchy.getAnnotationObjects().findAll {it.getPathClass() == PathClassFactory.getPathClass("Tissue")}
+    else
+        tissues = [selectedROI]
 
     //First, detect for each tissues...
     tissues.each{
@@ -847,7 +850,8 @@ if (clearAll) {
 
     //detect tissue and cells
     detect_tissue(imageData, 'BRIGHTFIELD_H_DAB', tissueThreshold);
-    detect_positive(imageData);
+    detect_positive(imageData, 'BRIGHTFIELD_H_DAB', cellThreshold, cellThresholdPositive);
+
 } else {
     hierarchy.removeObjects(hierarchy.getAnnotationObjects().findAll{it.getROI() instanceof EllipseROI},true)
 }
