@@ -89,10 +89,6 @@ Platform.runLater {
     menuTitle = "Ki-67 Analysis"
     
     def gui = QuPathGUI.getInstance()
-    def viewer = gui.getViewer()
-    def imageData = viewer.getImageData()
-    def hierarchy = imageData.getHierarchy()
-    println imageData
 
     menuBar = gui.menuBar
     RemoveMenu(menuBar, customId)
@@ -101,16 +97,16 @@ Platform.runLater {
     MenuItem menuItem1 = new MenuItem("Tissue detection");
     MenuItem menuItem2 = new MenuItem("Nuclei detection");
     MenuItem menuItem3 = new MenuItem("Import NDPA contours");    
-    MenuItem menuItem4 = new MenuItem("Find hotspot in Tissue/ROIs or selected");
-    MenuItem menuItem5 = new MenuItem("Parameters...");
+    MenuItem menuItem4 = new MenuItem("Intersect NDPA with Tissue");    
+    MenuItem menuItem5 = new MenuItem("Find hotspot in Tissue/ROIs or selected");
+    MenuItem menuItem6 = new MenuItem("Parameters...");
     SeparatorMenuItem sep = new SeparatorMenuItem();
     
     menuItem1.setOnAction {
-        QP.clearAllObjects();
-        QP.createSelectAllObject(true);
-
-        //hierarchy.clearAll();
-        //hierarchy.getSelectionModel().clearSelection();
+        def imageData = getImageData()
+        def hierarchy = imageData.getHierarchy()
+        def pathObjects = hierarchy.getObjects(null, null);
+        hierarchy.removeObjects(pathObjects, true);
 
         pipeline.detect_tissue(imageData, 'BRIGHTFIELD_H_DAB', tissueThreshold)
         Dialogs.showInfoNotification(menuTitle, "Tissue detected!")
@@ -119,7 +115,9 @@ Platform.runLater {
     }
     
     menuItem2.setOnAction {
-        def currentObject = viewer.getSelectedObject()
+        def imageData = getImageData()
+        def hierarchy = imageData.getHierarchy()
+        def currentObject = hierarchy.getSelectionModel().getSelectedObject()
         if (currentObject != null)
             Dialogs.showInfoNotification(menuTitle, "Detection only within selected contour!")
 
@@ -128,6 +126,8 @@ Platform.runLater {
     }
 
     menuItem3.setOnAction {
+        def imageData = getImageData()
+        def hierarchy = imageData.getHierarchy()
         // Remove any existing ROI or TISSUE_COMBINED regions
         //def regions = hierarchy.getAnnotationObjects().findAll {it.getPathClass() == PathClassFactory.getPathClass("Region")}
         hierarchy.removeObjects(hierarchy.getAnnotationObjects().findAll{it.getName().startsWith("ROI")}, true)
@@ -137,16 +137,27 @@ Platform.runLater {
 
         // Import new contours
         pipeline.read_ndpa(imageData);
-        pipeline.add_merged_rois(imageData, "ROI","Region")
-        pipeline.add_merged_rois(imageData, "Tissue","Tissue")
-        pipeline.shape_rois(imageData);
+
         Dialogs.showInfoNotification(menuTitle, "NDPA contours imported!")
 
         hierarchy.fireHierarchyChangedEvent(this)
     }
 
     menuItem4.setOnAction {
-        def currentObject = viewer.getSelectedObject()
+        def imageData = getImageData()
+        def hierarchy = imageData.getHierarchy()
+
+        pipeline.add_merged_rois(imageData, "ROI","Region")
+        pipeline.add_merged_rois(imageData, "Tissue","Tissue")
+        pipeline.shape_rois(imageData);
+        Dialogs.showInfoNotification(menuTitle, "Intersection complete!")
+        hierarchy.fireHierarchyChangedEvent(this)
+    }
+
+    menuItem5.setOnAction {
+        def imageData = getImageData()
+        def hierarchy = imageData.getHierarchy()
+        def currentObject = hierarchy.getSelectionModel().getSelectedObject()
         if (currentObject != null)
             Dialogs.showInfoNotification(menuTitle, "Detection only within selected contour!")
 
@@ -157,7 +168,7 @@ Platform.runLater {
             pipeline.add_hotspot(imageData, "TISSUE_COMBINED", "HSTISSUE",radiusMicrons, minCells)
     }
 
-    menuItem5.setOnAction {
+    menuItem6.setOnAction {
         def params = new ParameterList()
             .addIntParameter("tissueThreshold", "Tissue Threshold", tissueThreshold, "", "the threshold value for tissue detection")
             .addDoubleParameter("cellThreshold", "Cell Threshold", cellThreshold, "", "the threshold value for cell detection")
@@ -188,8 +199,9 @@ Platform.runLater {
     menu.getItems().add(menuItem2);
     menu.getItems().add(menuItem3);
     menu.getItems().add(menuItem4);
-    menu.getItems().add(sep);
     menu.getItems().add(menuItem5);
+    menu.getItems().add(sep);
+    menu.getItems().add(menuItem6);
 
     menu.setId(customId)
     menus = menuBar.getMenus()

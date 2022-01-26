@@ -610,6 +610,14 @@ def read_ndpa(imageData)
 
     }
 
+    for (regionPath in hierarchy.getAnnotationObjects().findAll {it.getName().contains("ROI ")} ) {
+        regionPath.setColorRGB(ColorTools.makeRGB(0, 0, 0))
+    }
+
+    for (regionPath in hierarchy.getAnnotationObjects().findAll {it.getName().contains("ROI2")} ) {
+        regionPath.setColorRGB(ColorTools.makeRGB(255, 0, 0))
+    }
+
 }
 
 /* 
