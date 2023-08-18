@@ -10,6 +10,9 @@ import groovy.io.FileType
 import java.awt.image.BufferedImage
 import qupath.lib.images.servers.ImageServerProvider
 import qupath.lib.gui.commands.ProjectCommands
+import qupath.lib.gui.tools.GuiTools
+import qupath.lib.gui.images.stores.DefaultImageRegionStore
+import qupath.lib.gui.images.stores.ImageRegionStoreFactory
 
 //Did we receive a string via the command line args keyword?
 if (args.size() > 0)
@@ -20,58 +23,113 @@ else
 if (selectedDir == null)
     return
     
-//Check if we already have a QuPath Project directory in there...
+// Check if we already have a QuPath Project directory in there...
 projectName = "QuPathProject"
 File directory = new File(selectedDir.toString() + File.separator + projectName)
 
 if (!directory.exists())
 {
-    print("No project directory, creating one!")
+    println "No project directory, creating one!"
     directory.mkdirs()
 }
 
 // Create project
 def project = Projects.createProject(directory , BufferedImage.class)
 
-// Build a list of files
-def files = []
+// Set up cache
+def imageRegionStore = ImageRegionStoreFactory.createImageRegionStore(QuPathGUI.getTileCacheSizeBytes());
+
+// Some filetypes are split between a name and a folder and we need to eliminate the folder from our recursive search.
+// This is the case for vsi files for instance.
+def skipList = []
 selectedDir.eachFileRecurse (FileType.FILES) { file ->
-    if (file.getName().toLowerCase().endsWith(".ndpi"))
-    {
-        files << file
-        print(file.getCanonicalPath())      
+    if (file.name.endsWith(".vsi")) {
+        print(file.name)
+        f = new File(file.parent+File.separator+"_"+file.name.substring(0, file.name.length() - 4)+"_")
+        skipList.add(f.toString()) //getCanonicalPath())
+        return
     }
 }
 
 // Add files to the project
-for (file in files) {
+selectedDir.eachFileRecurse (FileType.FILES) { file ->
     def imagePath = file.getCanonicalPath()
-    
-    // Get serverBuilder
-    def support = ImageServerProvider.getPreferredUriImageSupport(BufferedImage.class, imagePath)
-    def builder = support.builders.get(0)
-
-    // Make sure we don't have null 
-    if (builder == null) {
-       print "Image not supported: " + imagePath
-       continue
+    skip = false
+    for (p in skipList) {
+        //print("--->"+p)
+        if (imagePath.startsWith(p)) {
+            skip = true
+        }
+        
+    }
+    if (skip == true) {
+        //print("Skipping "+imagePath)
+        return
+    }
+        
+    // Skip a folder if there is a corresponding .vsi file.
+    if (file.isDirectory()) {
+        print(file.getParent())
+        print(file.getName().startsWith('_') && file.getName().endsWith('_'))
+        return
     }
     
-    // Add the image as entry to the project
-    print "Adding: " + imagePath
-    entry = project.addImage(builder)
+    // Skip the project directory itself
+    if (file.getCanonicalPath().startsWith(directory.getCanonicalPath() + File.separator))
+        return
+        
+    // I tend to add underscores to the end of filenames I want excluded
+    // MacOSX seems to add hidden files that start with a dot (._), don't add those
+    if (file.getName().endsWith("_") || file.getName().startsWith("."))
+        return
+
+    // Is it a file we know how to read?
+    def support = ImageServerProvider.getPreferredUriImageSupport(BufferedImage.class, imagePath)
+    if (support == null)
+        return
+
+    // iterate through the scenes contained in the image file
+    support.builders.eachWithIndex { builder, i -> 
+        sceneName = file.getName()
+        
+        if (sceneName.endsWith('.vsi')) {
+            //This is specific to .vsi files, we do not add a scene name to a vsi file
+            if (support.builders.size() >= 3 && i < 2) {
+                return;
+            }
+        } else {
+            if (support.builders.size() > 1)
+                sceneName += " - Scene #" + (i+1)
+        }
+        // Add a new entry for the current builder and remove it if we weren't able to read the image.
+        // I don't like it but I wasn't able to use PathIO.readImageData().
+        entry = project.addImage(builder)
     
-    // Set a particular image type
-    def imageData = entry.readImageData()
-    imageData.setImageType(ImageData.ImageType.BRIGHTFIELD_H_DAB)
-    entry.saveImageData(imageData)
+        try {
+            imageData = entry.readImageData()
+        } catch (Exception ex) {
+            println sceneName +" -- Error reading image data " + ex
+            project.removeImage(entry, true)
+            return
+        }
+        
+        println "Adding: " + sceneName
     
-    // Write a thumbnail if we can
-    var img = ProjectCommands.getThumbnailRGB(imageData.getServer());
-    entry.setThumbnail(img)
+        // Set a particular image type automatically (based on /qupath/lib/gui/QuPathGUI.java#L2847)
+        def imageType = GuiTools.estimateImageType(imageData.getServer(), imageRegionStore.getThumbnail(imageData.getServer(), 0, 0, true));
+        imageData.setImageType(imageType)
+        println "Image type estimated to be " + imageType
+
+        // Adding image data to the project entry
+        entry.saveImageData(imageData)
     
-    // Add an entry name (the filename)
-    entry.setImageName(file.getName())
+        // Write a thumbnail if we can
+        var img = ProjectCommands.getThumbnailRGB(imageData.getServer());
+        entry.setThumbnail(img)
+        
+        // Add an entry name (the filename)
+        entry.setImageName(sceneName)
+    }
 }
 
 // Changes should now be reflected in the project directory
